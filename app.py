@@ -73,23 +73,57 @@ if query:
         # ----------------------------
         # Evaluation: Recall@k
         # ----------------------------
+        df_all = pd.read_csv("synthetic_retail_data.csv")
+        query_lower = query.lower()
         ground_truth_ids = [
-            str(i) for i, desc in enumerate(pd.read_csv("synthetic_retail_data.csv")["Description"]) if query.split()[0] in desc
+            str(i) for i, desc in enumerate(df_all["Description"])
+            if query_lower.split()[0] in str(desc).lower()
         ]
         relevant_retrieved = set(ids) & set(ground_truth_ids)
         recall = len(relevant_retrieved) / len(ground_truth_ids) if ground_truth_ids else 0.0
 
-        st.info(f"📈 Recall@{k_value}: **{recall:.2f}** (Relevant retrieved: {len(relevant_retrieved)} / {len(ground_truth_ids)})")
+        st.info(f"📈 Recall@{k_value}: **{recall:.2f}** "
+                f"(Relevant retrieved: {len(relevant_retrieved)} / {len(ground_truth_ids)})")
 
         # ----------------------------
         # Analytics visualization
         # ----------------------------
         if filtered_docs:
             df = pd.DataFrame(filtered_docs)
+
+            st.subheader("📊 Analytics")
+
+            col1, col2, col3 = st.columns(3)
+
+            # 1. Average Price
+            avg_price = df["UnitPrice"].astype(float).mean()
+            col1.metric("Average Price", f"${avg_price:.2f}")
+
+            # 2. Total Sales Value
+            df["SalesValue"] = df["UnitPrice"].astype(float) * df["Quantity"].astype(int)
+            total_sales = df["SalesValue"].sum()
+            col2.metric("Total Sales Value", f"${total_sales:.2f}")
+
+            # 3. Top Product
+            top_product = df["Description"].value_counts().idxmax()
+            top_count = df["Description"].value_counts().max()
+            col3.metric("Top Product", f"{top_product} ({top_count})")
+
+            # ----------------------------
+            # Country Distribution
+            # ----------------------------
             st.subheader("🌍 Results by Country")
             st.bar_chart(df["Country"].value_counts())
+
+            # ----------------------------
+            # Top 5 Products
+            # ----------------------------
+            st.subheader("🏆 Top 5 Products")
+            st.bar_chart(df["Description"].value_counts().head(5))
         else:
             st.warning("⚠️ No results after applying filters.")
 
     else:
         st.warning("⚠️ No results found. Try another query.")
+
+
