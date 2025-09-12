@@ -13,8 +13,26 @@ except Exception as e:
 from sentence_transformers import SentenceTransformer
 import chromadb
 
-# Page + theme suggestion (user can put theme in .streamlit/config.toml)
+# -------------------------
+# Page + theme suggestion
+# -------------------------
 st.set_page_config(page_title="Chunking Optimizer", layout="wide")
+
+# Custom Styles
+st.markdown("""
+    <style>
+        /* Orange headings */
+        h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+            color: #FF8000 !important;
+        }
+        /* Grey helper text */
+        .grey-text {
+            color: #808080 !important;
+            font-size: 15px;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 st.title("📦 Chunking Optimizer — Sequential Flow")
 
 # Sidebar progress UI helper
@@ -37,27 +55,21 @@ def render_progress(stage):
         if STAGES.index(s) < STAGES.index(stage):
             st.sidebar.markdown(f"✅ <span style='color:green'>{LABELS[s]}</span>", unsafe_allow_html=True)
         elif s == stage:
-            st.sidebar.markdown(f"🟠 <span style='color:orange'>{LABELS[s]}</span>", unsafe_allow_html=True)
+            st.sidebar.markdown(f"🟠 <span style='color:orange;font-weight:bold'>{LABELS[s]}</span>", unsafe_allow_html=True)
         else:
             st.sidebar.markdown(f"⚪ <span style='color:grey'>{LABELS[s]}</span>", unsafe_allow_html=True)
 
-# session init
-if "stage" not in st.session_state:
-    st.session_state.stage = "upload"
-if "df" not in st.session_state:
-    st.session_state.df = None
-if "chunks" not in st.session_state:
-    st.session_state.chunks = None
-if "embeddings" not in st.session_state:
-    st.session_state.embeddings = None
-if "model_name" not in st.session_state:
-    st.session_state.model_name = None
-if "collection" not in st.session_state:
-    st.session_state.collection = None
-if "model_obj" not in st.session_state:
-    st.session_state.model_obj = None
-if "metadatas" not in st.session_state:
-    st.session_state.metadatas = None
+# -------------------------
+# Session init
+# -------------------------
+if "stage" not in st.session_state: st.session_state.stage = "upload"
+if "df" not in st.session_state: st.session_state.df = None
+if "chunks" not in st.session_state: st.session_state.chunks = None
+if "embeddings" not in st.session_state: st.session_state.embeddings = None
+if "model_name" not in st.session_state: st.session_state.model_name = None
+if "collection" not in st.session_state: st.session_state.collection = None
+if "model_obj" not in st.session_state: st.session_state.model_obj = None
+if "metadatas" not in st.session_state: st.session_state.metadatas = None
 
 def goto(s): st.session_state.stage = s
 
@@ -72,7 +84,6 @@ if st.session_state.stage == "upload":
     if uploaded:
         try:
             df = backend.load_csv(uploaded)
-            # normalize column headers simple
             df.columns = [str(c).strip() for c in df.columns]
             st.session_state.df = df
             st.success("Loaded CSV")
@@ -80,6 +91,7 @@ if st.session_state.stage == "upload":
             st.dataframe(backend.preview_data(df, 5))
             st.subheader("Column dtypes")
             st.table(pd.DataFrame({"column": df.columns, "dtype": [str(df[c].dtype) for c in df.columns]}))
+            st.markdown('<p class="grey-text">Confirm upload before proceeding.</p>', unsafe_allow_html=True)
             if st.button("Confirm upload & Proceed", key="confirm_upload"):
                 goto("dtype")
         except Exception as e:
@@ -94,9 +106,7 @@ elif st.session_state.stage == "dtype":
     st.table(pd.DataFrame({"column": df.columns, "dtype": [str(df[c].dtype) for c in df.columns]}))
     cols = df.columns.tolist()
     cols_to_change = st.multiselect("Select columns to change dtype", options=cols, key="dtype_sel")
-    dtype_map = {}
-    for c in cols_to_change:
-        dtype_map[c] = st.selectbox(f"Target dtype for {c}", ["Keep","str","int","float","datetime"], key=f"dtype_{c}")
+    dtype_map = {c: st.selectbox(f"Target dtype for {c}", ["Keep","str","int","float","datetime"], key=f"dtype_{c}") for c in cols_to_change}
     if st.button("Apply dtype changes", key="apply_dtype"):
         df2 = df.copy()
         applied=[]
@@ -117,7 +127,6 @@ elif st.session_state.stage == "dtype":
 elif st.session_state.stage == "layer1":
     st.header("Step 3 — Preprocessing Layer 1")
     df = st.session_state.df
-    # detect HTML
     html_cols = [c for c in df.columns if df[c].astype(str).str.contains(r"<.*?>", na=False).any()]
     if html_cols:
         st.info(f"HTML-like content found in: {html_cols}")
@@ -147,38 +156,22 @@ elif st.session_state.stage == "layer2":
     total_missing = int(df.isnull().sum().sum())
     dup_count = int(df.duplicated().sum())
     st.write(f"Missing values total: **{total_missing}** — Duplicate rows: **{dup_count}**")
-    remove_dup = False
-    if dup_count > 0:
-        remove_dup = st.checkbox("Remove duplicate rows", key="l2_dup")
+    remove_dup = st.checkbox("Remove duplicate rows", key="l2_dup") if dup_count > 0 else False
     if total_missing > 0:
         missing_choice = st.selectbox("Missing handling", ["none","drop","fill"], key="l2_missing")
-        fill_value = None
-        if missing_choice == "fill":
-            fill_value = st.text_input("Fill value", value="Unknown", key="l2_fill")
+        fill_value = st.text_input("Fill value", value="Unknown", key="l2_fill") if missing_choice=="fill" else None
     else:
         st.info("No missing values detected.")
-        missing_choice = "none"
-        fill_value = None
-
-    # text normalization
-    text_cols = [c for c in df.columns if df[c].dtype == object]
-    norm_stop = st.checkbox("Remove stopwords (text cols)", key="l2_stop")
-    norm_stem = st.checkbox("Apply stemming", key="l2_stem")
-    norm_lemma = st.checkbox("Apply lemmatization", key="l2_lemma")
-
+        missing_choice, fill_value = "none", None
+    st.markdown('<p class="grey-text">Text normalization (stopwords, stemming, lemmatization) optional.</p>', unsafe_allow_html=True)
     if st.button("Apply Layer2", key="apply_l2"):
         df2 = df.copy()
-        if missing_choice == "drop":
-            df2 = backend.handle_missing(df2, "drop")
-        elif missing_choice == "fill":
-            df2 = backend.handle_missing(df2, "fill", fill_value)
-        if remove_dup:
-            df2 = backend.drop_duplicates(df2)
-        # rudimentary normalization: lowercase already done; advanced (nltk) left as optional
+        if missing_choice == "drop": df2 = backend.handle_missing(df2, "drop")
+        elif missing_choice == "fill": df2 = backend.handle_missing(df2, "fill", fill_value)
+        if remove_dup: df2 = backend.drop_duplicates(df2)
         st.session_state.df = df2
         st.success("Layer2 applied")
         st.dataframe(backend.preview_data(df2,5))
-
     if st.button("Proceed to Quality Gate", key="to_quality"):
         goto("quality")
 
@@ -192,17 +185,12 @@ elif st.session_state.stage == "quality":
     st.metric("Columns", len(df.columns))
     st.metric("Missing (total)", int(df.isnull().sum().sum()))
     st.metric("Duplicate rows", int(df.duplicated().sum()))
-    # simple pass criteria
     missing_frac = df.isnull().sum().sum() / max(1, (len(df)*len(df.columns)))
     dup_frac = int(df.duplicated().sum()) / max(1, len(df))
     passed = (missing_frac <= 0.2) and (dup_frac <= 0.05)
-    if passed:
-        st.success("Quality gate PASSED")
-    else:
-        st.warning("Quality gate FAILED — please fix before chunking")
+    if passed: st.success("Quality gate PASSED")
+    else: st.warning("Quality gate FAILED — please fix before chunking")
     if st.button("Proceed to Chunking", key="to_chunk"):
-        if not passed:
-            st.warning("Proceeding despite quality gate failing (you chose to continue).")
         goto("chunk")
 
 # -------------------------
@@ -211,10 +199,18 @@ elif st.session_state.stage == "quality":
 elif st.session_state.stage == "chunk":
     st.header("Step 6 — Chunking")
     df = st.session_state.df
-    st.write("Chunking strategies available: Fixed, Recursive, Semantic+Recursive")
-    choice = st.selectbox("Chunking strategy", ["Fixed Size", "Recursive (langchain)", "Semantic+Recursive"], key="chunk_choice")
+    st.write("Choose between Fixed, Recursive, Semantic+Recursive, Semantic (Cosine Similarity)")
+    choice = st.selectbox("Chunking strategy", [
+        "Fixed Size",
+        "Recursive (langchain)",
+        "Semantic+Recursive",
+        "Semantic (Cosine Similarity)"
+    ], key="chunk_choice")
     chunk_size = st.number_input("Chunk size (chars)", min_value=50, max_value=5000, value=400, key="chunk_size")
     overlap = st.number_input("Chunk overlap", min_value=0, max_value=chunk_size-1, value=50, key="chunk_overlap")
+    threshold = None
+    if choice == "Semantic (Cosine Similarity)":
+        threshold = st.slider("Similarity threshold", 0.0, 1.0, 0.7, 0.05, key="semantic_thresh")
     if st.button("Run Chunking", key="run_chunk"):
         with st.spinner("Creating chunks..."):
             try:
@@ -223,29 +219,23 @@ elif st.session_state.stage == "chunk":
                     metadatas = None
                 elif choice == "Recursive (langchain)":
                     chunks = backend.recursive_chunk(df, chunk_size=int(chunk_size), overlap=int(overlap))
-                    # build per-row metadata but note: recursive chunking splits across many chunks,
-                    # this simple approach will not map chunks->row perfectly; we will provide row-level metadata list
                     metadatas = backend.build_row_metadatas(df)
-                else:
+                elif choice == "Semantic+Recursive":
                     chunks = backend.semantic_recursive_chunk(df, chunk_size=int(chunk_size), overlap=int(overlap))
                     metadatas = backend.build_row_metadatas(df)
-
-                st.session_state.chunks = chunks
-                st.session_state.metadatas = metadatas
+                else:
+                    chunks = backend.semantic_chunking(df, model_name="all-MiniLM-L6-v2", threshold=threshold)
+                    metadatas = backend.build_row_metadatas(df)
+                st.session_state.chunks, st.session_state.metadatas = chunks, metadatas
                 st.success(f"Created {len(chunks)} chunks")
-                st.write("Sample chunks (first 3):")
-                for c in chunks[:3]:
-                    st.code(c[:400])
-                # show space usage comparison
+                for c in chunks[:3]: st.code(c[:400])
                 stats = backend.compare_space_usage_all(df, chunk_size=int(chunk_size), overlap=int(overlap))
                 st.subheader("Space usage (chars)")
                 st.write(stats)
             except Exception as e:
                 st.error(f"Chunking failed: {e}")
-
-    if st.session_state.chunks:
-        if st.button("Proceed to Embedding", key="to_embed"):
-            goto("embed")
+    if st.session_state.chunks and st.button("Proceed to Embedding", key="to_embed"):
+        goto("embed")
 
 # -------------------------
 # Embedding
@@ -253,26 +243,20 @@ elif st.session_state.stage == "chunk":
 elif st.session_state.stage == "embed":
     st.header("Step 7 — Embedding")
     chunks = st.session_state.chunks or []
-    if not chunks:
-        st.warning("No chunks to embed")
+    if not chunks: st.warning("No chunks to embed")
     else:
-        model_choice = st.selectbox("Model for embeddings", ["all-MiniLM-L6-v2","paraphrase-MiniLM-L6-v2","all-mpnet-base-v2"], key="model_select")
+        model_choice = st.selectbox("Embedding model", ["all-MiniLM-L6-v2","paraphrase-MiniLM-L6-v2","all-mpnet-base-v2"], key="model_select")
         batch_size = st.number_input("Batch size", 1, 1024, 64, key="emb_batch")
-        if st.button("Generate embeddings (in session)", key="gen_emb"):
-            with st.spinner("Computing embeddings..."):
+        if st.button("Generate embeddings", key="gen_emb"):
+            with st.spinner("Embedding..."):
                 try:
                     model = SentenceTransformer(model_choice)
                     embeddings = model.encode(chunks, batch_size=int(batch_size), show_progress_bar=True)
-                    st.session_state.embeddings = embeddings
-                    st.session_state.model_name = model_choice
-                    st.session_state.model_obj = model
-                    st.success("Embeddings created and stored in session")
-                    st.write("Vector length:", len(embeddings[0]) if len(embeddings)>0 else 0)
-                except Exception as e:
-                    st.error(f"Failed to embed: {e}")
-        if st.session_state.embeddings is not None:
-            if st.button("Proceed to Storage", key="to_store"):
-                goto("store")
+                    st.session_state.embeddings, st.session_state.model_name, st.session_state.model_obj = embeddings, model_choice, model
+                    st.success("Embeddings created")
+                except Exception as e: st.error(f"Failed: {e}")
+        if st.session_state.embeddings is not None and st.button("Proceed to Storage", key="to_store"):
+            goto("store")
 
 # -------------------------
 # Store (Chroma)
@@ -283,113 +267,91 @@ elif st.session_state.stage == "store":
     embeddings = st.session_state.embeddings
     model_choice = st.session_state.model_name
     metadatas = st.session_state.metadatas
+
     if chunks is None or embeddings is None:
         st.warning("Chunks/embeddings missing")
     else:
-        store = st.radio("Store in ChromaDB?", ["No","Yes"], key="store_radio")
+        store = st.radio("Store in ChromaDB?", ["No", "Yes"], key="store_radio")
         coll_name = st.text_input("Collection name", value="my_collection", key="coll_name")
-        if store=="Yes" and st.button("Store now", key="do_store"):
+
+        if store == "Yes" and st.button("Store now", key="do_store"):
             with st.spinner("Storing in Chroma..."):
                 try:
                     client = chromadb.PersistentClient(path="chromadb_store")
-                    # create/get collection
+
                     try:
                         collection = client.get_collection(coll_name)
                     except Exception:
                         collection = client.create_collection(coll_name)
-                    # clear existing
+
                     try:
                         ex = collection.get()
                         if "ids" in ex and ex["ids"]:
                             collection.delete(ids=ex["ids"])
                     except Exception:
                         pass
+
                     ids = [str(i) for i in range(len(chunks))]
-                    emb_lists = [list(map(float,e)) for e in embeddings]
-                    # if metadatas present and same length, add
+                    emb_lists = [list(map(float, e)) for e in embeddings]
+
                     if (metadatas is not None) and (len(metadatas) == len(chunks)):
-                        collection.add(ids=ids, documents=chunks, embeddings=emb_lists, metadatas=metadatas)
+                        collection.add(
+                            ids=ids,
+                            documents=chunks,
+                            embeddings=emb_lists,
+                            metadatas=metadatas
+                        )
                     else:
-                        # If metadatas None or mismatch -> add without metadatas
-                        collection.add(ids=ids, documents=chunks, embeddings=emb_lists)
+                        collection.add(
+                            ids=ids,
+                            documents=chunks,
+                            embeddings=emb_lists
+                        )
+
                     st.session_state.collection = collection
-                    st.success(f"Stored {len(chunks)} in collection {coll_name}")
+                    st.success(f"✅ Stored {len(chunks)} in collection {coll_name}")
+
                 except Exception as e:
                     st.error(f"Store failed: {e}")
-        if st.session_state.collection:
-            if st.button("Proceed to Retrieval", key="to_retrieve"):
-                goto("retrieve")
+
+        if st.session_state.collection and st.button("Proceed to Retrieval", key="to_retrieve"):
+            goto("retrieve")
 
 # -------------------------
-# Retrieve / Search
+# Retrieval
 # -------------------------
 elif st.session_state.stage == "retrieve":
     st.header("Step 9 — Semantic Retrieval")
     if not st.session_state.collection or not st.session_state.model_obj:
-        st.error("No collection or model available (store embeddings first).")
+        st.error("No collection or model available.")
     else:
-        q = st.text_input("Query (semantic):", key="query_text")
+        q = st.text_input("Enter query", key="query_text")
         k = st.slider("Top-k", 1, 20, 5, key="topk")
-        # metadata filter UI (simple numeric min-max)
         col_opts = [c for c in st.session_state.df.columns if pd.api.types.is_numeric_dtype(st.session_state.df[c])]
-        selected_num_col = st.selectbox("Optional numeric filter column (metadata)", ["None"] + col_opts, key="meta_col")
-        num_min, num_max = None, None
-        if selected_num_col != "None":
+        selected_num_col = st.selectbox("Numeric filter (optional)", ["None"]+col_opts, key="meta_col")
+        if selected_num_col!="None":
             col_series = st.session_state.df[selected_num_col].dropna().astype(float)
-            if not col_series.empty:
-                num_min = float(col_series.min())
-                num_max = float(col_series.max())
-                r_min, r_max = st.slider("Range", float(num_min), float(num_max), (float(num_min), float(num_max)), key="meta_range")
-            else:
-                r_min, r_max = None, None
-        else:
-            r_min, r_max = None, None
-
-        if st.button("Search now", key="search_btn"):
+            r_min, r_max = st.slider("Range", float(col_series.min()), float(col_series.max()), (float(col_series.min()), float(col_series.max())), key="meta_range")
+        else: r_min, r_max = None, None
+        if st.button("Search", key="search_btn"):
             with st.spinner("Searching..."):
                 try:
-                    model = st.session_state.model_obj
-                    coll = st.session_state.collection
+                    model, coll = st.session_state.model_obj, st.session_state.collection
                     q_emb = model.encode([q])
                     res = coll.query(query_embeddings=q_emb, n_results=k, include=["documents","metadatas","distances"])
-                    docs = res.get("documents", [[]])[0]
-                    dists = res.get("distances", [[]])[0]
-                    metas = res.get("metadatas", [[]])[0]
-                    # combine
-                    combined = []
-                    for doc, meta, dist in zip(docs, metas, dists):
-                        combined.append((doc, meta, float(dist)))
-                    # If user provided numeric filter, apply client-side filter using metadata dict
-                    if selected_num_col != "None" and r_min is not None:
-                        filtered = []
-                        for doc, meta, dist in combined:
-                            if not meta:
-                                continue
-                            val = meta.get(selected_num_col)
-                            try:
-                                if val is None:
-                                    continue
-                                valf = float(val)
-                                if r_min <= valf <= r_max:
-                                    filtered.append((doc, meta, dist))
-                            except Exception:
-                                # non-numeric metadata -> skip
-                                continue
-                        combined = filtered
-                    if not combined:
-                        st.info("No results found (after metadata filtering if applied).")
+                    docs, dists, metas = res.get("documents", [[]])[0], res.get("distances", [[]])[0], res.get("metadatas", [[]])[0]
+                    combined = [(doc,meta,float(dist)) for doc,meta,dist in zip(docs,metas,dists)]
+                    if selected_num_col!="None" and r_min is not None:
+                        combined = [x for x in combined if x[1] and selected_num_col in x[1] and r_min <= float(x[1][selected_num_col]) <= r_max]
+                    if not combined: st.info("No results found")
                     else:
-                        # sort by ascending distance (lower = more similar)
-                        combined = sorted(combined, key=lambda x: x[2])
-                        st.success(f"Found {len(combined)} results (top {k} requested):")
-                        for i, (doc, meta, dist) in enumerate(combined):
+                        combined = sorted(combined, key=lambda x:x[2])
+                        for i,(doc,meta,dist) in enumerate(combined):
                             st.markdown(f"**Rank {i+1} (dist {dist:.4f})**")
                             st.write(doc)
-                            if meta:
-                                st.json(meta)
-                            else:
-                                st.caption("No metadata attached.")
-                except Exception as e:
-                    st.error(f"Search failed: {e}")
+                            if meta: st.json(meta)
+                            else: st.caption("No metadata")
+                except Exception as e: st.error(f"Search failed: {e}")
+
 
 # end
