@@ -1,19 +1,24 @@
 # backend.py
+import io, csv, typing, re, math
 import pandas as pd
-import io, csv, typing, re
 from sentence_transformers import SentenceTransformer
 import chromadb
 
-# optional: encoding detection
+# Text splitter import (langchain_text_splitters). Use whichever you have installed.
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except Exception:
+    # fallback name for older langchain packages
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# ----------------------------
+# CSV Loading / Utilities
+# ----------------------------
 try:
     import chardet
-except ImportError:
+except Exception:
     chardet = None
 
-
-# ----------------------------
-# CSV Loading
-# ----------------------------
 def _detect_sep(sample_text: str) -> str:
     try:
         dialect = csv.Sniffer().sniff(sample_text[:4096])
@@ -21,9 +26,8 @@ def _detect_sep(sample_text: str) -> str:
     except Exception:
         return ","
 
-
-def load_csv(file_or_path: typing.Union[str, io.BytesIO]):
-    """Load CSV from path or streamlit uploaded file"""
+def load_csv(file_or_path: typing.Union[str, io.BytesIO, io.StringIO]):
+    """Load CSV from path or stream file (Streamlit uploaded file)"""
     if isinstance(file_or_path, str):
         return pd.read_csv(file_or_path)
 
@@ -49,12 +53,12 @@ def load_csv(file_or_path: typing.Union[str, io.BytesIO]):
 
     raise ValueError("Unsupported input for load_csv")
 
-
 def preview_data(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
-    return df.sample(n=min(len(df), n), random_state=42).reset_index(drop=True)
-
+    n = min(len(df), n)
+    return df.sample(n=n, random_state=42).reset_index(drop=True)
 
 def change_dtype(df: pd.DataFrame, col: str, dtype: str):
+    """Try converting dtype; returns (df, error_string_or_None)"""
     try:
         if dtype == "str":
             df[col] = df[col].astype(str)
@@ -70,9 +74,8 @@ def change_dtype(df: pd.DataFrame, col: str, dtype: str):
     except Exception as e:
         return df, str(e)
 
-
 # ----------------------------
-# Preprocessing
+# Simple Preprocessing helpers
 # ----------------------------
 def remove_html(df: pd.DataFrame) -> pd.DataFrame:
     clean_re = re.compile(r"<.*?>")
@@ -81,19 +84,16 @@ def remove_html(df: pd.DataFrame) -> pd.DataFrame:
         df2[c] = df2[c].astype(str).apply(lambda s: re.sub(clean_re, "", s))
     return df2
 
-
 def to_lowercase(df: pd.DataFrame) -> pd.DataFrame:
     df2 = df.copy()
     for c in df2.select_dtypes(include=["object"]).columns:
         df2[c] = df2[c].astype(str).str.lower()
     return df2
 
-
 def drop_duplicates(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop_duplicates().reset_index(drop=True)
 
-
-def handle_missing(df: pd.DataFrame, strategy: str, fill_value: str = "unknown") -> pd.DataFrame:
+def handle_missing(df: pd.DataFrame, strategy: str, fill_value: typing.Any = "unknown") -> pd.DataFrame:
     if strategy == "drop":
         return df.dropna().reset_index(drop=True)
     elif strategy == "fill":
@@ -101,105 +101,182 @@ def handle_missing(df: pd.DataFrame, strategy: str, fill_value: str = "unknown")
     else:
         return df
 
-
 # ----------------------------
-# Chunking (Recursive)
+# Chunking functions
 # ----------------------------
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-def recursive_chunk(df: pd.DataFrame, chunk_size: int = 200, overlap: int = 20):
-    """Flatten rows to text and apply recursive chunking"""
-    docs = df.astype(str).apply(lambda row: ", ".join([f"{c}: {row[c]}" for c in df.columns]), axis=1).tolist()
-    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=overlap)
-    chunks = splitter.split_text("\n".join(docs))
+def fixed_size_chunking_from_text(text: str, chunk_size: int = 400, overlap: int = 50):
+    chunks = []
+    if chunk_size <= 0:
+        return [text]
+    step = chunk_size - overlap if chunk_size > overlap else chunk_size
+    for i in range(0, len(text), step):
+        chunk = text[i:i+chunk_size]
+        if chunk:
+            chunks.append(chunk)
     return chunks
 
-# Semantic Compression
-# ----------------------------
+def fixed_size_chunking_from_df(df: pd.DataFrame, chunk_size: int = 400, overlap: int = 50):
+    # flatten each row into a comparable string and chunk across full text
+    docs = df.astype(str).apply(lambda row: " | ".join([f"{c}: {row[c]}" for c in df.columns]), axis=1).tolist()
+    text = "\n".join(docs)
+    return fixed_size_chunking_from_text(text, chunk_size=chunk_size, overlap=overlap)
+
+def recursive_chunk(df: pd.DataFrame, chunk_size: int = 400, overlap: int = 50):
+    docs = df.astype(str).apply(lambda row: ", ".join([f"{c}: {row[c]}" for c in df.columns]), axis=1).tolist()
+    text = "\n".join(docs)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=overlap)
+    chunks = splitter.split_text(text)
+    return chunks
+
+# Semantic compression (row → short sentence)
 def semantic_compression(df: pd.DataFrame):
-    """
-    Create a compressed semantic representation of each row.
-    Example: 'Shoes sold in Germany on 2023-01-01, quantity 3, priced at $306.04.'
-    """
     compressed_rows = []
     for _, row in df.iterrows():
         try:
-            description = str(row.get("Description", "item"))
-            country = str(row.get("Country", "Unknown"))
-            date = str(row.get("InvoiceDate", ""))
-            qty = str(row.get("Quantity", ""))
-            price = str(row.get("UnitPrice", ""))
-            compressed = f"{description} sold in {country} on {date}, quantity {qty}, priced at ${price}."
+            # try to cover common columns; if not present, compress generically
+            if "Description" in row.index and "Country" in row.index:
+                description = str(row.get("Description", "item"))
+                country = str(row.get("Country", "Unknown"))
+                date = str(row.get("InvoiceDate", ""))
+                qty = str(row.get("Quantity", ""))
+                price = str(row.get("UnitPrice", ""))
+                compressed = f"{description} sold in {country} on {date}, qty {qty}, price ${price}"
+            else:
+                # generic numeric-heavy summary
+                pieces = []
+                for c, v in row.items():
+                    if pd.api.types.is_numeric_dtype(type(v)) or isinstance(v, (int, float)):
+                        try:
+                            pieces.append(f"{c}:{float(v):.0f}")
+                        except Exception:
+                            pieces.append(f"{c}:{v}")
+                    else:
+                        pieces.append(f"{c}:{str(v)[:30]}")
+                compressed = "; ".join(pieces)
         except Exception:
-            compressed = "Transaction record"
+            compressed = "record"
         compressed_rows.append(compressed)
     return compressed_rows
 
-
-def semantic_recursive_chunk(df: pd.DataFrame, chunk_size: int = 200, overlap: int = 20):
-    """
-    Apply semantic compression first, then recursive chunking.
-    """
+def semantic_recursive_chunk(df: pd.DataFrame, chunk_size: int = 400, overlap: int = 50):
     compressed = semantic_compression(df)
     text = "\n".join(compressed)
-
     splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=overlap)
     chunks = splitter.split_text(text)
     return chunks
 
 # ----------------------------
-# Space Comparison
+# Space usage comparison
 # ----------------------------
-def compare_space_usage(df, chunk_size=200, overlap=20):
-    """
-    Compare total character size of Recursive vs Semantic Compression + Recursive chunking.
-    Returns dict with stats.
-    """
-    # 1. Standard recursive
-    docs = df.astype(str).apply(
-        lambda row: ", ".join([f"{c}: {row[c]}" for c in df.columns]), axis=1
-    ).tolist()
+def compare_space_usage_all(df: pd.DataFrame, chunk_size: int = 400, overlap: int = 50):
+    # recursive
+    docs = df.astype(str).apply(lambda row: ", ".join([f"{c}: {row[c]}" for c in df.columns]), axis=1).tolist()
     rec_text = "\n".join(docs)
-    rec_total_chars = len(rec_text)
+    rec_total = len(rec_text)
 
-    # 2. Semantic compression recursive
-    compressed = semantic_compression(df)
-    sem_text = "\n".join(compressed)
-    sem_total_chars = len(sem_text)
+    # semantic
+    sem_rows = semantic_compression(df)
+    sem_text = "\n".join(sem_rows)
+    sem_total = len(sem_text)
+
+    # fixed (flatten whole text then chunk; total chars equals flattened)
+    fixed_text = "\n".join(df.astype(str).apply(lambda row: " | ".join([f"{c}: {row[c]}" for c in df.columns]), axis=1).tolist())
+    fixed_total = len(fixed_text)
 
     return {
-        "recursive_total_chars": rec_total_chars,
-        "recursive_avg_per_row": rec_total_chars / len(df),
-        "semantic_total_chars": sem_total_chars,
-        "semantic_avg_per_row": sem_total_chars / len(df),
+        "recursive_total_chars": rec_total,
+        "recursive_avg_per_row": rec_total / max(1, len(df)),
+        "semantic_total_chars": sem_total,
+        "semantic_avg_per_row": sem_total / max(1, len(df)),
+        "fixed_total_chars": fixed_total,
+        "fixed_avg_per_row": fixed_total / max(1, len(df)),
         "rows": len(df)
     }
 
-
-
 # ----------------------------
-# Embeddings + ChromaDB
+# Embedding + Chroma helpers
 # ----------------------------
-def embed_and_store(chunks, model_name="all-MiniLM-L6-v2", chroma_path="chroma_store", collection_name="default"):
-    model = SentenceTransformer(model_name)
-    embeddings = model.encode(chunks, batch_size=32, show_progress_bar=True)
+def embed_and_store(chunks: typing.List[str],
+                    embeddings: typing.Optional[typing.List[typing.List[float]]] = None,
+                    model_name: str = "all-MiniLM-L6-v2",
+                    chroma_path: str = "chromadb_store",
+                    collection_name: str = "default",
+                    metadatas: typing.Optional[typing.List[dict]] = None):
+    """
+    If embeddings None -> compute via model. Then store in Chroma.
+    metadatas: optional list matching chunks length (dictionaries)
+    """
+    model = None
+    if embeddings is None:
+        model = SentenceTransformer(model_name)
+        embeddings = model.encode(chunks, batch_size=64, show_progress_bar=True)
+
+    # ensure embeddings are lists of float
+    emb_lists = [list(map(float, e)) for e in embeddings]
 
     client = chromadb.PersistentClient(path=chroma_path)
-    collection = client.get_or_create_collection(collection_name)
+    # create or get collection
+    try:
+        collection = client.get_collection(collection_name)
+    except Exception:
+        collection = client.create_collection(collection_name)
 
-    # clear old data
-    if collection.count() > 0:
-        all_ids = collection.get()["ids"]
-        if all_ids:
-            collection.delete(ids=all_ids)
+    # Clear previous content (safe)
+    try:
+        existing = collection.get()
+        if "ids" in existing and existing["ids"]:
+            collection.delete(ids=existing["ids"])
+    except Exception:
+        pass
 
     ids = [str(i) for i in range(len(chunks))]
-    collection.add(ids=ids, documents=chunks, embeddings=embeddings)
 
-    return collection, model
+    # add with or without metadata
+    if metadatas is not None:
+        # sanitize metadata values (must be primitives)
+        sanitized = []
+        for m in metadatas:
+            dd = {}
+            for k, v in (m or {}).items():
+                if v is None:
+                    dd[k] = None
+                elif isinstance(v, (str, int, float, bool)):
+                    dd[k] = v
+                else:
+                    dd[k] = str(v)
+            sanitized.append(dd)
+        collection.add(ids=ids, documents=chunks, embeddings=emb_lists, metadatas=sanitized)
+    else:
+        collection.add(ids=ids, documents=chunks, embeddings=emb_lists)
 
+    return collection, (model if model is not None else SentenceTransformer(model_name))
 
 def search_query(collection, model, query: str, k: int = 5):
     q_emb = model.encode([query])
-    res = collection.query(query_embeddings=q_emb, n_results=k)
+    res = collection.query(query_embeddings=q_emb, n_results=k, include=["documents", "metadatas", "distances"])
     return res
+
+# ----------------------------
+# Simple helper to build metadata list from dataframe (numeric columns preserved)
+# ----------------------------
+def build_row_metadatas(df: pd.DataFrame):
+    metadatas = []
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    # also include a set of small useful categorical for filtering
+    small_cat = df.select_dtypes(include=["object", "category"]).columns.tolist()[:2]
+    for _, row in df.iterrows():
+        md = {}
+        for c in numeric_cols:
+            try:
+                val = row[c]
+                # convert numpy types
+                if pd.isna(val):
+                    md[c] = None
+                else:
+                    md[c] = float(val) if not isinstance(val, (str,)) else float(str(val))
+            except Exception:
+                md[c] = None
+        for c in small_cat:
+            md[c] = (None if pd.isna(row.get(c)) else str(row.get(c)))
+        metadatas.append(md)
+    return metadatas
