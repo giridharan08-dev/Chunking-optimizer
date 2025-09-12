@@ -1,3 +1,4 @@
+
 # backend.py
 import io, csv, typing, re, math
 import pandas as pd
@@ -133,7 +134,6 @@ def semantic_compression(df: pd.DataFrame):
     compressed_rows = []
     for _, row in df.iterrows():
         try:
-            # try to cover common columns; if not present, compress generically
             if "Description" in row.index and "Country" in row.index:
                 description = str(row.get("Description", "item"))
                 country = str(row.get("Country", "Unknown"))
@@ -142,7 +142,6 @@ def semantic_compression(df: pd.DataFrame):
                 price = str(row.get("UnitPrice", ""))
                 compressed = f"{description} sold in {country} on {date}, qty {qty}, price ${price}"
             else:
-                # generic numeric-heavy summary
                 pieces = []
                 for c, v in row.items():
                     if pd.api.types.is_numeric_dtype(type(v)) or isinstance(v, (int, float)):
@@ -166,20 +165,62 @@ def semantic_recursive_chunk(df: pd.DataFrame, chunk_size: int = 400, overlap: i
     return chunks
 
 # ----------------------------
+# Semantic Chunking (Cosine Similarity based)
+# ----------------------------
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+
+def semantic_chunking(df: pd.DataFrame,
+                      model_name: str = "all-MiniLM-L6-v2",
+                      threshold: float = 0.7):
+    """
+    Group rows into semantic chunks using cosine similarity of row embeddings.
+    Rows with similarity >= threshold are grouped into the same chunk.
+    """
+    docs = df.astype(str).apply(
+        lambda row: " | ".join([f"{c}: {row[c]}" for c in df.columns]),
+        axis=1
+    ).tolist()
+
+    if not docs:
+        return []
+
+    model = SentenceTransformer(model_name)
+    embeddings = model.encode(docs, show_progress_bar=False)
+
+    chunks, current_chunk, current_embs = [], [], []
+    for text, emb in zip(docs, embeddings):
+        if not current_chunk:
+            current_chunk.append(text)
+            current_embs.append(emb)
+        else:
+            avg_emb = np.mean(current_embs, axis=0).reshape(1, -1)
+            sim = cosine_similarity(avg_emb, emb.reshape(1, -1))[0][0]
+            if sim >= threshold:
+                current_chunk.append(text)
+                current_embs.append(emb)
+            else:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = [text]
+                current_embs = [emb]
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    return chunks
+
+# ----------------------------
 # Space usage comparison
 # ----------------------------
 def compare_space_usage_all(df: pd.DataFrame, chunk_size: int = 400, overlap: int = 50):
-    # recursive
     docs = df.astype(str).apply(lambda row: ", ".join([f"{c}: {row[c]}" for c in df.columns]), axis=1).tolist()
     rec_text = "\n".join(docs)
     rec_total = len(rec_text)
 
-    # semantic
     sem_rows = semantic_compression(df)
     sem_text = "\n".join(sem_rows)
     sem_total = len(sem_text)
 
-    # fixed (flatten whole text then chunk; total chars equals flattened)
     fixed_text = "\n".join(df.astype(str).apply(lambda row: " | ".join([f"{c}: {row[c]}" for c in df.columns]), axis=1).tolist())
     fixed_total = len(fixed_text)
 
@@ -211,17 +252,14 @@ def embed_and_store(chunks: typing.List[str],
         model = SentenceTransformer(model_name)
         embeddings = model.encode(chunks, batch_size=64, show_progress_bar=True)
 
-    # ensure embeddings are lists of float
     emb_lists = [list(map(float, e)) for e in embeddings]
 
     client = chromadb.PersistentClient(path=chroma_path)
-    # create or get collection
     try:
         collection = client.get_collection(collection_name)
     except Exception:
         collection = client.create_collection(collection_name)
 
-    # Clear previous content (safe)
     try:
         existing = collection.get()
         if "ids" in existing and existing["ids"]:
@@ -231,9 +269,7 @@ def embed_and_store(chunks: typing.List[str],
 
     ids = [str(i) for i in range(len(chunks))]
 
-    # add with or without metadata
     if metadatas is not None:
-        # sanitize metadata values (must be primitives)
         sanitized = []
         for m in metadatas:
             dd = {}
@@ -257,19 +293,17 @@ def search_query(collection, model, query: str, k: int = 5):
     return res
 
 # ----------------------------
-# Simple helper to build metadata list from dataframe (numeric columns preserved)
+# Metadata helper
 # ----------------------------
 def build_row_metadatas(df: pd.DataFrame):
     metadatas = []
     numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    # also include a set of small useful categorical for filtering
     small_cat = df.select_dtypes(include=["object", "category"]).columns.tolist()[:2]
     for _, row in df.iterrows():
         md = {}
         for c in numeric_cols:
             try:
                 val = row[c]
-                # convert numpy types
                 if pd.isna(val):
                     md[c] = None
                 else:
